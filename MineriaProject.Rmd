@@ -1,0 +1,419 @@
+---
+title: "Untitled"
+author: "Francisco De Lio"
+date: "13/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+ds <- read.csv("~/Datasets/dataset-of-10s.csv")
+
+ds$mode=as.factor(ds$mode)
+dsn=ds[,sapply(1:length(ds),function(i) is.numeric(ds[,i]))]
+dsn[,1:14]=scale(dsn[,1:14],center=T,scale=T)
+mean(dsn$target)
+head(dsn)
+dsn$target=as.factor(dsn$target)
+```
+
+```{r}
+dsn$target=as.numeric(dsn$target)
+cor(dsn)
+dsn$target=as.factor(dsn$target)
+```
+
+
+
+```{r}
+summary(ds)
+summary(ds[ds$target==1,])
+```
+
+```{r}
+D = dist(dsn[,-15])
+hc <- hclust(D, method = "ward.D2") 
+plot(hc)
+k=2 #numero de clusters escogido
+
+# LETS CONSOLIDATE THE PARTITION
+set.seed(7)
+k3 <- kmeans(dsn[,-15],centers=k)
+cluster=as.factor(k3$cluster)
+```
+
+```{r}
+profiling.target <- catdes(dsn,15)
+profiling.target$quanti
+```
+
+```{r}
+dsc=cbind(dsn[,-15],cluster)
+profiling.cluster <- catdes(dsc,15)
+profiling.cluster$quanti
+```
+
+
+```{r}
+profilecontinuos <- condes(ds[,c(4:7, 9:19)],15)
+profilecontinuos$quanti
+write_xlsx(profilecontinuos$quanti,"targetprof.xlsx")
+```
+
+
+```{r}
+set.seed(59)
+train=sample(1:nrow(dsn),nrow(dsn)*0.8)
+test=-train
+y.test=dsn$target[test]
+```
+
+#Trees
+
+```{r}
+library(tree)
+tr=tree(target~.,data=dsn,subset=train)
+tree.pred=predict(tr,dsn[-train,],type="class")
+(tb=table(tree.pred,dsn$target[-train]))
+sum(diag(tb)/sum(rowSums(tb)))
+```
+
+```{r}
+cv.tr=cv.tree(tr,FUN=prune.misclass)
+cv.tr
+plot(cv.tr$size,cv.tr$dev,type="b")
+```
+```{r}
+prune.tr=prune.misclass(tr,best=3)
+tree.pred=predict(prune.tr,dsn[-train,],type="class")
+(tb=table(tree.pred,dsn$target[-train]))
+(tre=sum(diag(tb)/sum(rowSums(tb))))
+```
+
+```{r}
+library(randomForest)
+forest=randomForest(formula = target ∼., data = dsn, mtry=4,
+importance=TRUE, subset = train)
+forest
+forest.pred=predict(forest,dsn[-train,],type="class")
+(tb=table(forest.pred,dsn$target[-train]))
+(randfo=sum(diag(tb)/sum(rowSums(tb))))
+importance(forest)
+```
+
+
+```{r}
+library(gbm)
+tr.boost=gbm(as.character(target)∼.,data=dsn[train,], distribution="bernoulli",n.trees=500, interaction.depth=4)
+summary(tr.boost,plot=F)
+tr.boost.probs=predict(tr.boost,newdata=dsn[-train,],type="response")
+tr.boost.pred=rep(0,nrow(dsn[-train,]))
+tr.boost.pred[tr.boost.probs>.5]=1
+(tb=table(tr.boost.pred,dsn$target[-train]))
+(gboost=sum(diag(tb)/sum(rowSums(tb))))
+```
+```{r}
+library(xgboost)
+library(Matrix)
+library(data.table)
+
+df_train=dsn[train,]
+df_test=dsn[test,]
+df_train=data.table(df_train, keep.rownames = FALSE)
+df_test=data.table(df_test, keep.rownames = FALSE)
+sparse_matrix <- sparse.model.matrix(target~., data =df_train)[,-1]
+sparse_matrix_test <- sparse.model.matrix(target~., data =df_test)[,-1]
+output_vector = (df_train$target==1)
+bst <- xgboost(data = sparse_matrix, label = output_vector, max_depth = 3,
+               eta = 0.1, nthread = 2, nrounds = 700,objective = "binary:logistic",early_stopping_rounds=10,verbose=0)
+
+xgb.probs=predict(bst,sparse_matrix_test,type="response")
+xgb.pred=rep(0,nrow(dsn[-train,]))
+xgb.pred[xgb.probs>.5]=1
+(tb=table(xgb.pred,dsn$target[-train]))
+(xg=sum(diag(tb)/sum(rowSums(tb))))
+```
+
+#Statistical Models
+
+```{r}
+#logistic.lasso
+library(glmnet)
+x=model.matrix(target~.,dsn)[,-15]
+y=dsn$target
+#grid=10^(seq(10,-2,length=100))
+
+# Find the best lambda using cross-validation
+#set.seed(123) 
+cv.lasso <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+# Fit the final model on the training data
+model <- glmnet(x, y, alpha = 1, family = "binomial",
+                lambda = cv.lasso$lambda.min)
+ockham.model= glmnet(x, y, alpha = 1, family = "binomial",
+                lambda =cv.lasso$lambda.1se) #best model with bias toward simplicity
+# Display regression coefficients
+coef(model)
+# Make predictions on the test data
+
+probabilities <-predict(model,newx = x[test,])
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+# Model accuracy
+(lasso=mean(predicted.classes == y[test]))
+probabilities <-predict(ockham.model,newx = x[test,])
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+# Model accuracy
+mean(predicted.classes == y[test])
+coef(ockham.model)
+```
+
+```{r}
+glm.fits=glm(target~.-speechiness,data=dsn,family=binomial,subset=train)
+glm.probs=predict(glm.fits,dsn[-train,],type="response")
+glm.pred=rep(0,nrow(dsn[-train,]))
+glm.pred[glm.probs>.5]=1
+tb=table(glm.pred,dsn$target[-train])
+tb
+(logreg=sum(diag(tb)/sum(rowSums(tb))))
+summary(glm.fits)
+```
+
+```{r}
+library(MASS)
+lda.fit=lda(target~.,data=dsn,subset=train)
+lda.fit
+plot(lda.fit)
+lda.pred=predict(lda.fit, dsn[-train,])
+lda.class=lda.pred$class
+table(lda.class,dsn$target[-train])
+(lda=mean(lda.class==dsn$target[-train]))
+sum(lda.pred$posterior[,1]>=.5)
+sum(lda.pred$posterior[,1]<.5)
+lda.pred$posterior[1:20,1]
+lda.class[1:20]
+
+sum(lda.pred$posterior[,1]>.9)
+```
+```{r}
+qda.fit=qda(target~.,data=dsn,subset=train)
+qda.fit
+qda.class=predict(qda.fit,dsn[-train,])$class
+table(qda.class,dsn$target[-train])
+(qda=mean(qda.class==dsn$target[-train]))
+```
+
+#KNN
+
+```{r}
+library(lattice)
+library(caret)
+knnFit <- caret::train(target ~ ., data = dsn[train,], method ="knn", trControl = caret::trainControl(method="repeatedcv"), preProcess = c("center","scale"),tuneLength = 20)
+knnFit
+```
+
+```{r}
+library(class)
+scaled.dsn=scale(dsn[,-15],center=TRUE,scale=TRUE)
+train.X=scaled.dsn[train,-15]
+test.X=scaled.dsn[-train,-15]
+knn.pred=knn(train.X,test.X,dsn$target[train],k=15)
+table(knn.pred,dsn$target[-train])
+(KNN=mean(knn.pred==dsn$target[-train]))
+```
+
+#NB & SVM
+
+```{r}
+library(e1071)
+NBmodel=naiveBayes(target∼., data=dsn[train,])
+tb=table(true=dsn$target[test], pred=predict(NBmodel,newdata=dsn[test,]))
+tb
+(NB=sum(diag(tb)/sum(rowSums(tb))))
+library(caret)
+```
+
+```{r}
+tune.out=tune(svm,target∼., data=dsn[train,], kernel ="radial",
+ranges=list(cost=c(0.1,1,10,100),
+gamma=c(0.1,0.5,1,2)),tunecontrol = tune.control(sampling = "fix",fix=0.9))
+tb=table(true=dsn$target[test], pred=predict(tune.out$best.model,
+newdata=dsn[test,]))
+(radsvm=sum(diag(tb)/sum(rowSums(tb))))
+summary(tune.out)
+```
+
+```{r}
+tune.out=tune(svm,target∼., data=dsn[train,], kernel ="linear",
+ranges=list(cost=c(0.01,0.1,1,10,100)),tunecontrol = tune.control(sampling = "fix",fix=0.9))
+tb=table(true=dsn$target[test], pred=predict(tune.out$best.model,
+newdata=dsn[test,]))
+(lsvm=sum(diag(tb)/sum(rowSums(tb))))
+summary(tune.out)
+```
+```{r}
+tune.out=tune(svm,target∼., data=dsn[train,], kernel ="polynomial",
+ranges=list(cost=c(0.01,0.1,1,10,100,1000)),tunecontrol = tune.control(sampling = "fix",fix=0.9))
+tb=table(true=dsn$target[test], pred=predict(tune.out$best.model, newdata=dsn[test,]))
+(polsvm=sum(diag(tb)/sum(rowSums(tb))))
+summary(tune.out)
+```
+
+```{r}
+
+```
+
+
+```{r}
+results=data.frame(Method=c("Base Decision Trees","Random Forests","Gradient Boosted Trees","XGBoosted Trees","Logistic LASSO","Logistic Regression","Linear Discriminant Analysis","Quadratic discriminant Analysis","KNN","Naive Bayes","Radial SVM","Linear SVM","Polynomial SVM","Artificial Neural Network"), Success.Rate=c(tre,randfo,gboost,xg,lasso,logreg,lda,qda,KNN,NB,radsvm,lsvm,polsvm,neur))
+results=results[order(results$Success.Rate,decreasing=TRUE),]
+results
+nrow(dsn[train,])
+nrow(dsn[test,])
+```
+
+```{r}
+library(xgboost)
+library(Matrix)
+library(data.table)
+library(purrr)
+k=10
+dsnk=dsn
+dsnk$fold=rdunif(nrow(dsnk),1,k)
+predicted.accuracy=rep(0,k)
+for(i in 1:k){
+df_train=dsn[dsnk$fold!=i,]
+df_test=dsn[dsnk$fold==i,]
+df_train=data.table(df_train, keep.rownames = FALSE)
+df_test=data.table(df_test, keep.rownames = FALSE)
+sparse_matrix <- sparse.model.matrix(target~., data =df_train)[,-1]
+sparse_matrix_test <- sparse.model.matrix(target~., data =df_test)[,-1]
+output_vector = (df_train$target==1)
+bst <- xgboost(data = sparse_matrix, label = output_vector, max_depth = 3,
+               eta = 0.1, nthread = 2, nrounds = 700,objective = "binary:logistic",early_stopping_rounds=10,verbose=0)
+
+xgb.probs=predict(bst,sparse_matrix_test,type="response")
+xgb.pred=rep(0,nrow(dsn[dsnk$fold==i,]))
+xgb.pred[xgb.probs>.5]=1
+tb=table(xgb.pred,dsn$target[dsnk$fold==i])
+predicted.accuracy[i]=sum(diag(tb)/sum(rowSums(tb)))
+}
+predicted.accuracy
+qplot(predicted.accuracy,geom="density",xlab="Accuracy Density")
+mean(predicted.accuracy)
+```
+
+```{r}
+adj.rand.index(dsn$target,cluster)
+```
+
+```{r}
+dsn$target[1:50]
+cluster[1:50]
+```
+
+
+```{r}
+PERM.log=function(X_test,index){
+	for(i in 1:ncol(X_test)){
+		if(index[i]==1){
+			X_test[,i]=sample(X_test[,i], replace=FALSE)
+		}
+	}
+	return(X_test)
+}
+
+get.perms=function(mod){
+	n <- ncol(X_test)
+	l <- rep(list(0:1), n)
+	variations=expand.grid(l)
+	accuracy=rep(0,n)
+	for(i in 1:nrow(variations)){
+		accuracy[i]=predict(mod,perm.log(X_test,variations[i,]))
+	}
+	return(cbind)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#not gonna work
+
+library(tensorflow)
+library(keras)
+library(dplyr)
+
+install_keras()
+install_tensorflow()
+
+
+
+modelo_keras <- keras_model_sequential() %>% 
+  layer_dense(units = 1,
+              kernel_initializer = "uniform",
+              activation = "relu",
+              input_shape = ncol(dsn[train,-15])) %>% 
+  layer_dropout(rate = 0.1) %>% 
+  layer_dense(units = 16,
+              kernel_initializer = "uniform",
+              activation = "relu") %>% 
+  layer_dropout(rate = 0.1) %>% 
+  layer_dense(units = 1,
+              kernel_initializer = "uniform",
+              activation = "sigmoid") %>% 
+  compile(optimizer = "adam",
+          loss = "binary_crossentropy",
+          metrics = c("accuracy"))
+
+
+
+resultado <- fit(
+  object = modelo_keras,
+  x = as.matrix(dsn[train,-15]),
+  y = dsn[train,15],
+  batch_size = 50,
+  epochs = 35,
+  validation_split = 0.30,
+  verbose = 0
+)
+
+plot(resultado) +
+  theme_bw()
+
+
+`
+# Predicción de clases 
+rta_class <- modelo_keras %>% 
+  predict_classes(dsn[test,-15]) %>% 
+  as.factor() %>% 
+  fct_recode(yes = "1", no = "0")
+
+
+library("writexl")
+write_xlsx(the dataframe name,"path to store the Excel file\\file name.xlsx")
+
